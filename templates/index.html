@@ -1,1 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>HEVC GPU Converter</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 950px;
+            margin: 40px auto;
+            background: #111;
+            color: #eee;
+        }
 
+        h1, h2 {
+            color: #fff;
+        }
+
+        input, select, button {
+            width: 100%;
+            padding: 10px;
+            margin: 8px 0 18px;
+            box-sizing: border-box;
+            border-radius: 6px;
+            border: 1px solid #444;
+        }
+
+        button {
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        pre {
+            background: #000;
+            color: #0f0;
+            padding: 15px;
+            height: 330px;
+            overflow: auto;
+            white-space: pre-wrap;
+            border-radius: 6px;
+        }
+
+        .box {
+            border: 1px solid #333;
+            padding: 18px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            background: #181818;
+        }
+
+        .hint {
+            color: #aaa;
+            font-size: 0.92em;
+            margin-top: -12px;
+            margin-bottom: 16px;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .status {
+            padding: 12px;
+            background: #222;
+            border-radius: 6px;
+        }
+    </style>
+</head>
+<body>
+    <h1>HEVC GPU Converter</h1>
+
+    <div class="box">
+        <label>Conversion mode</label>
+        <select id="mode" onchange="toggleMode()">
+            <option value="single" selected>Single file</option>
+            <option value="batch">Batch folder</option>
+        </select>
+
+        <div id="singleBox">
+            <label>Input file</label>
+            <input id="inputPath" placeholder="C:\Videos\input.mkv">
+
+            <button onclick="loadAudio()">Load audio tracks</button>
+
+            <label>Audio track</label>
+            <select id="audioSelect"></select>
+            <div class="hint">
+                In single-file mode, you can select a specific audio track.
+            </div>
+        </div>
+
+        <div id="batchBox" class="hidden">
+            <label>Input folder</label>
+            <input id="inputFolder" placeholder="C:\Videos">
+
+            <label>Preferred audio language</label>
+            <input id="preferredLanguage" value="eng" placeholder="e.g. eng, cze, slo">
+            <div class="hint">
+                In batch mode, the app will try to use the first audio track with this language code.
+                If no matching track is found, the first available audio track will be used.
+            </div>
+        </div>
+
+        <label>Output folder</label>
+        <input id="outputFolder" placeholder="Leave empty = automatically create a converted folder next to the input files">
+        <div class="hint">
+            If left empty, the app will create a converted folder and keep the original filenames.
+        </div>
+    </div>
+
+    <div class="box">
+        <label>Video encoder</label>
+        <select id="encoderMode">
+            <option value="h264_nvenc_compatible" selected>H.264 NVENC - compatible MP4 for older devices</option>
+            <option value="h264_nvenc_fast">H.264 NVENC - faster</option>
+            <option value="libx264_cpu">H.264 libx264 - CPU fallback, slower</option>
+            <option value="hevc_nvenc">HEVC NVENC - smaller file size, lower compatibility</option>
+        </select>
+
+        <label>Encoding quality</label>
+        <select id="qualityMode">
+            <option value="high">High quality / slower</option>
+            <option value="medium" selected>Medium quality</option>
+            <option value="low">Lower quality / faster / smaller file</option>
+        </select>
+
+        <label>Resolution</label>
+        <select id="resolutionMode">
+            <option value="1080p" selected>Max 1080p / recommended for older devices</option>
+            <option value="720p">Max 720p</option>
+            <option value="480p">Max 480p</option>
+            <option value="source">Keep source resolution</option>
+        </select>
+
+        <label>Target file size</label>
+        <input id="targetSize" value="700M">
+        <div class="hint">
+            Examples: 700M, 900M, 1.5G. Leave empty to use quality-based encoding without a fixed target size.
+        </div>
+
+        <label>Audio bitrate</label>
+        <select id="audioBitrate">
+            <option value="96">96 kbps</option>
+            <option value="128" selected>128 kbps</option>
+            <option value="192">192 kbps</option>
+            <option value="256">256 kbps</option>
+            <option value="320">320 kbps</option>
+        </select>
+    </div>
+
+    <button onclick="startConvert()">Convert</button>
+
+    <h2>Status</h2>
+    <div id="status" class="status">Waiting...</div>
+
+    <h2>Log</h2>
+    <pre id="log"></pre>
+
+    <script>
+        let currentJobId = null;
+        let polling = null;
+
+        function toggleMode() {
+            const mode = document.getElementById("mode").value;
+
+            document.getElementById("singleBox").classList.toggle("hidden", mode !== "single");
+            document.getElementById("batchBox").classList.toggle("hidden", mode !== "batch");
+        }
+
+        async function loadAudio() {
+            const inputPath = document.getElementById("inputPath").value;
+
+            const response = await fetch("/probe", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({input_path: inputPath})
+            });
+
+            const data = await response.json();
+
+            if (data.error) {
+                alert(data.error);
+                return;
+            }
+
+            const select = document.getElementById("audioSelect");
+            select.innerHTML = "";
+
+            data.audio_streams.forEach(stream => {
+                const option = document.createElement("option");
+                option.value = stream.index;
+                option.textContent =
+                    `Index ${stream.index} | ${stream.language} | ${stream.codec} | ${stream.channels} channels | ${stream.title}`;
+                select.appendChild(option);
+            });
+        }
+
+        async function startConvert() {
+            const mode = document.getElementById("mode").value;
+
+            const payload = {
+                mode: mode,
+                input_path: document.getElementById("inputPath").value,
+                input_folder: document.getElementById("inputFolder").value,
+                output_folder: document.getElementById("outputFolder").value,
+                audio_index: document.getElementById("audioSelect").value,
+                preferred_language: document.getElementById("preferredLanguage").value,
+                target_size: document.getElementById("targetSize").value,
+                audio_bitrate: document.getElementById("audioBitrate").value,
+                encoder_mode: document.getElementById("encoderMode").value,
+                quality_mode: document.getElementById("qualityMode").value,
+                resolution_mode: document.getElementById("resolutionMode").value
+            };
+
+            const response = await fetch("/convert", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(payload)
+            });
+
+            const data = await response.json();
+
+            if (data.error) {
+                alert(data.error);
+                return;
+            }
+
+            currentJobId = data.job_id;
+            document.getElementById("status").textContent = "Conversion started...";
+
+            if (polling) {
+                clearInterval(polling);
+            }
+
+            polling = setInterval(checkStatus, 1000);
+        }
+
+        async function checkStatus() {
+            if (!currentJobId) return;
+
+            const response = await fetch(`/status/${currentJobId}`);
+            const data = await response.json();
+
+            let statusText = `Status: ${data.status}`;
+
+            if (data.total) {
+                statusText += ` | File ${data.current}/${data.total}`;
+            }
+
+            if (data.done_files) {
+                statusText += ` | Completed: ${data.done_files.length}`;
+            }
+
+            if (data.failed_files && data.failed_files.length > 0) {
+                statusText += ` | Errors: ${data.failed_files.length}`;
+            }
+
+            document.getElementById("status").textContent = statusText;
+            document.getElementById("log").textContent = data.log || "";
+
+            const logBox = document.getElementById("log");
+            logBox.scrollTop = logBox.scrollHeight;
+
+            if (
+                data.status === "done" ||
+                data.status === "error" ||
+                data.status === "finished_with_errors"
+            ) {
+                clearInterval(polling);
+            }
+        }
+
+        toggleMode();
+    </script>
+</body>
+</html>
